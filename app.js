@@ -19,11 +19,12 @@ async function readCSV(filePath) {
                 Object.keys(data).forEach(key => { cleanData[key.trim()] = data[key] ? data[key].trim() : ''; });
                 results.push(cleanData);
             })
-            .on('end', () => resolve(results));
+            .on('end', () => resolve(results))
+            .on('error', (err) => resolve([]));
     });
 }
 
-// 2. Logic จัดตาราง (Advanced Keyword Matching for Room Types)
+// 2. Logic จัดตาราง
 function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAssignments, groups) {
     let timetable = [];
     let groupDailyLoad = {};
@@ -50,42 +51,37 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
         return true;
     };
 
-    // --- ฟังก์ชันกำหนดประเภทห้องเป้าหมาย (หัวใจหลักของการแก้ไขนี้) ---
     const findTargetRoomType = (subjectName, groupName, isPractice) => {
-        const sName = subjectName.toLowerCase();
-        const gName = groupName.toLowerCase();
+        const sName = subjectName ? subjectName.toLowerCase() : '';
+        const gName = groupName ? groupName.toLowerCase() : '';
 
-        // 1. Priority สูงสุด: กลุ่มเรียน Dual System (ทวิภาคี) -> Factory
         if (gName.includes('ทวิ') || gName.includes('dual') || gName.includes('dve')) {
             return 'Factory';
         }
-
-        // 2. Priority รอง: เช็คชื่อวิชาเพื่อให้ตรงกับห้อง Lab เฉพาะทาง
-        // (ต้องเช็คคำที่ยาว/เฉพาะเจาะจงก่อน เช่น Computer Graphic ก่อน Computer เฉยๆ)
         
         if (sName.includes('iot') || sName.includes('internet of things')) return 'IOT LAB';
-        
         if (sName.includes('network') || sName.includes('เครือข่าย')) return 'Network Lab';
-        
         if (sName.includes('ai ') || sName.includes('intelligence') || sName.includes('ปัญญาประดิษฐ์') || sName.includes('วิทยาการข้อมูล')) return 'AI Lab';
-        
         if (sName.includes('graphic') || sName.includes('กราฟิก') || sName.includes('3d') || sName.includes('multimedia') || sName.includes('game')) return 'Computer Graphic Lab';
-        
-        // ห้องคอมพิวเตอร์ทั่วไป (ถ้าชื่อห้องใน room.csv คือ 'Computer Lab')
         if (sName.includes('computer') || sName.includes('คอมพิวเตอร์') || sName.includes('programming') || sName.includes('database')) return 'Computer Lab';
 
-        // 3. Priority ทั่วไป
-        if (isPractice) return 'Practice_General'; // ปฏิบัติทั่วไป
-        return 'Theory'; // ทฤษฎี
+        if (isPractice) return 'Practice_General'; 
+        return 'Theory'; 
     };
 
-    // เรียงลำดับการจัด: วิชาปฏิบัติหน่วยกิตเยอะ -> น้อย
-    const sortedRegisters = [...registers].sort((a, b) => {
+    const validRegisters = registers.filter(r => {
+        const sId = r.subject_id || r['subject id'];
+        return subjects.some(s => (s.subject_id || s['subject id']) === sId);
+    });
+
+    const sortedRegisters = [...validRegisters].sort((a, b) => {
         const sIdA = a.subject_id || a['subject id'];
         const sIdB = b.subject_id || b['subject id'];
         const subA = subjects.find(s => (s.subject_id || s['subject id']) === sIdA);
         const subB = subjects.find(s => (s.subject_id || s['subject id']) === sIdB);
-        return (parseInt(subB?.theory||0) + parseInt(subB?.practice||0)) - (parseInt(subA?.theory||0) + parseInt(subA?.practice||0));
+        const totalA = parseInt(subA?.theory||0) + parseInt(subA?.practice||0);
+        const totalB = parseInt(subB?.theory||0) + parseInt(subB?.practice||0);
+        return totalB - totalA;
     });
 
     for (const reg of sortedRegisters) {
@@ -105,16 +101,14 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
         const teacherId = assignment ? (assignment.teacher_id || assignment['teacher id']) : null;
         const teacherInfo = teachers.find(t => (t.teacher_id || t['teacher id']) === teacherId);
 
-        // --- ระบุประเภทห้องที่ต้องการ ---
         const targetRoomType = findTargetRoomType(
-            subject.subject_name || '', 
-            groupObj ? (groupObj.group_name || '') : '', 
+            subject.subject_name, 
+            groupObj ? groupObj.group_name : '', 
             isPractice
         );
 
         let isBlockBooked = false;
 
-        // --- Block Scheduling Strategy ---
         if (totalPeriodsNeeded > 1) {
             let blockCandidates = [];
             const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
@@ -139,32 +133,20 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
                     }
 
                     if (isValidBlock) {
-                        // ค้นหาห้องที่ตรงกับ Target Type และว่างตลอด Block
                         const validRoom = rooms.find(r => {
                             const rType = r.room_type ? r.room_type.trim() : '';
                             const rName = r.room_name ? r.room_name.toLowerCase() : '';
-
-                            // *** Logic การเลือกห้อง (เข้มงวด) ***
                             let isTypeMatch = false;
 
-                            if (targetRoomType === 'Factory') {
-                                isTypeMatch = (rType === 'Factory');
-                            } else if (targetRoomType === 'Theory') {
-                                isTypeMatch = (rType === 'Theory');
-                            } else if (targetRoomType === 'Practice_General') {
-                                // ต้องไม่ใช่ Theory, ไม่ใช่ Factory และไม่ควรเป็น Lab เฉพาะทาง (ถ้าเลี่ยงได้)
-                                // แต่ในที่นี้เอาแค่ ไม่ใช่ Theory/Factory เพื่อความยืดหยุ่น
-                                isTypeMatch = (rType !== 'Theory') && (rType !== 'Factory');
-                            } else {
-                                // กรณีเป็น Specific Lab (IOT, Network, AI, Graphic)
-                                // เช็คว่า Type ตรงกัน หรือ ชื่อห้องมีคำนั้นอยู่
+                            if (targetRoomType === 'Factory') isTypeMatch = (rType === 'Factory');
+                            else if (targetRoomType === 'Theory') isTypeMatch = (rType === 'Theory');
+                            else if (targetRoomType === 'Practice_General') isTypeMatch = (rType !== 'Theory') && (rType !== 'Factory');
+                            else {
                                 const targetKeyword = targetRoomType.toLowerCase();
                                 isTypeMatch = (rType.toLowerCase() === targetKeyword) || rName.includes(targetKeyword.replace(' lab','')); 
                             }
 
                             if (!isTypeMatch) return false;
-
-                            // เช็คว่าห้องว่างไหม
                             return blockSlots.every(slot => {
                                 return isSlotFree(slot.timeslot_id || slot['timeslot id'], null, null, r.room_id || r['room id']);
                             });
@@ -185,11 +167,8 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
                 const bestBlock = blockCandidates[0];
                 bestBlock.slots.forEach(slot => {
                     timetable.push({
-                        group_id: gId,
-                        timeslot_id: slot.timeslot_id || slot['timeslot id'],
-                        subject_id: sId,
-                        teacher_id: teacherId,
-                        room_id: bestBlock.room.room_id || bestBlock.room['room id']
+                        group_id: gId, timeslot_id: slot.timeslot_id || slot['timeslot id'],
+                        subject_id: sId, teacher_id: teacherId, room_id: bestBlock.room.room_id || bestBlock.room['room id']
                     });
                 });
                 incrementGroupLoad(gId, bestBlock.day, totalPeriodsNeeded);
@@ -197,7 +176,6 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
             }
         }
 
-        // --- Fallback Strategy (กรณีหา Block ไม่ได้ ให้ลงทีละคาบ) ---
         if (!isBlockBooked) {
             for (let i = 0; i < totalPeriodsNeeded; i++) {
                 let candidates = [];
@@ -214,7 +192,6 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
                         const rId = r.room_id || r['room id'];
                         const rType = r.room_type ? r.room_type.trim() : '';
                         const rName = r.room_name ? r.room_name.toLowerCase() : '';
-
                         let isTypeMatch = false;
                         if (targetRoomType === 'Factory') isTypeMatch = (rType === 'Factory');
                         else if (targetRoomType === 'Theory') isTypeMatch = (rType === 'Theory');
@@ -223,7 +200,6 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
                             const targetKeyword = targetRoomType.toLowerCase();
                             isTypeMatch = (rType.toLowerCase() === targetKeyword) || rName.includes(targetKeyword.replace(' lab',''));
                         }
-
                         return isSlotFree(tSlotId, null, null, rId) && isTypeMatch;
                     });
 
@@ -239,11 +215,8 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
                     candidates.sort((a, b) => a.score - b.score);
                     const best = candidates[0];
                     timetable.push({
-                        group_id: gId, 
-                        timeslot_id: best.slot.timeslot_id || best.slot['timeslot id'],
-                        subject_id: sId, 
-                        teacher_id: teacherId, 
-                        room_id: best.room.room_id || best.room['room id']
+                        group_id: gId, timeslot_id: best.slot.timeslot_id || best.slot['timeslot id'],
+                        subject_id: sId, teacher_id: teacherId, room_id: best.room.room_id || best.room['room id']
                     });
                     incrementGroupLoad(gId, best.slot.day);
                 }
@@ -277,22 +250,53 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
     <head>
         <meta charset="UTF-8">
         <title>ระบบจัดตารางสอนอัตโนมัติ</title>
-        <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;600&display=swap" rel="stylesheet">
         <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
         
         <style>
-            body { font-family: 'Sarabun', sans-serif; padding: 0; margin: 0; background-color: #f4f6f9; }
+            body { 
+                font-family: 'Prompt', sans-serif; 
+                font-weight: 300; 
+                padding: 0; 
+                margin: 0; 
+                background-color: #f4f6f9; 
+            }
             .navbar { background-color: #004a99; padding: 15px 20px; color: white; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
             .navbar h1 { margin: 0; font-size: 20px; font-weight: 600; display: flex; align-items: center; }
-            .navbar h1 span { font-size: 12px; background: #2196F3; padding: 2px 8px; border-radius: 10px; margin-left: 10px; font-weight: normal;}
+            .navbar h1 span { font-size: 12px; background: #2196F3; padding: 2px 8px; border-radius: 10px; margin-left: 10px; font-weight: 400;}
+            
             .menu-container { display: flex; gap: 10px; align-items: center; }
             .menu-item { display: flex; flex-direction: column; }
             .menu-item label { font-size: 10px; margin-bottom: 2px; color: #bbdefb; }
-            select { padding: 8px; border-radius: 4px; border: none; font-family: 'Sarabun'; font-size: 14px; min-width: 180px; cursor: pointer; }
+            
+            select { 
+                padding: 8px; 
+                border-radius: 4px; 
+                border: none; 
+                font-family: 'Prompt', sans-serif; 
+                font-weight: 300;
+                font-size: 14px; 
+                min-width: 180px; 
+                cursor: pointer; 
+            }
             select:focus { outline: 2px solid #82b1ff; }
             
             .btn-group { display: flex; gap: 5px; margin-left: 10px; }
-            .btn { color: white; text-decoration: none; padding: 8px 12px; border-radius: 4px; font-size: 14px; transition: 0.3s; cursor: pointer; border: none; display: flex; align-items: center; gap: 5px; }
+            .btn { 
+                color: white; 
+                text-decoration: none; 
+                padding: 8px 12px; 
+                border-radius: 4px; 
+                font-size: 14px; 
+                transition: 0.3s; 
+                cursor: pointer; 
+                border: none; 
+                display: flex; 
+                align-items: center; 
+                gap: 5px; 
+                font-family: 'Prompt', sans-serif; 
+                font-weight: 300;
+            }
             .btn-excel { background: #2e7d32; }
             .btn-excel:hover { background: #1b5e20; }
             .btn-pdf { background: #d32f2f; }
@@ -303,34 +307,90 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             
             table.timetable { width: 100%; border-collapse: collapse; margin-top: 20px; table-layout: fixed; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
             table.timetable th, table.timetable td { border: 1px solid #000; padding: 4px; text-align: center; font-size: 11px; height: 55px; vertical-align: middle; overflow: hidden; }
-            table.timetable th { background-color: #e3f2fd; color: #333; font-weight: bold; border-bottom: 2px solid #2196F3; }
+            table.timetable th { background-color: #e3f2fd; color: #333; font-weight: 600; border-bottom: 2px solid #2196F3; }
             
             .summary-container { display: flex; gap: 10px; margin-top: 15px; align-items: flex-start; }
             table.summary { width: 100%; border-collapse: collapse; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
             table.summary th, table.summary td { border: 1px solid #000; padding: 6px; text-align: center; font-size: 12px; }
-            table.summary th { background-color: #004a99; color: white; height: 35px; }
+            table.summary th { background-color: #004a99; color: white; height: 35px; font-weight: 400; }
+            table.summary tfoot td { background-color: #f1f1f1; font-weight: 600; color: #333; }
             
-            table.summary tfoot td { background-color: #f1f1f1; font-weight: bold; color: #333; }
             .grand-total-box { background-color: #e8f5e9; border: 2px solid #4caf50; border-radius: 5px; padding: 10px; text-align: center; margin-top: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; justify-content: space-around; page-break-inside: avoid; }
             
             .group-legend { margin-top: 20px; border-top: 1px dashed #ccc; padding-top: 10px; font-size: 12px; color: #555; }
-            .group-legend h4 { margin: 0 0 5px 0; color: #333; }
+            .group-legend h4 { margin: 0 0 5px 0; color: #333; font-weight: 600; }
             .group-legend ul { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 15px; }
             .group-legend li { background: #f5f5f5; padding: 2px 8px; border-radius: 4px; border: 1px solid #eee; }
-            .group-legend strong { color: #388e3c; }
+            .group-legend strong { color: #388e3c; font-weight: 600; }
 
-            .time-header { font-size: 12px; display: block; margin-bottom: 2px; }
-            .period-label { font-size: 9px; color: #666; font-weight: normal; }
-            .day-col { background-color: #fafafa; font-weight: bold; width: 80px; color: #004a99; border-right: 2px solid #ddd; }
-            .break-col { background-color: #eee; font-weight: bold; writing-mode: vertical-rl; text-orientation: upright; color: #777; letter-spacing: 3px; }
+            .time-header { font-size: 12px; display: block; margin-bottom: 2px; font-weight: 600; }
+            .period-label { font-size: 9px; color: #666; font-weight: 300; }
+            .day-col { background-color: #fafafa; font-weight: 600; width: 80px; color: #004a99; border-right: 2px solid #ddd; }
+            
+            .break-col { 
+                background-color: #eee; 
+                font-weight: 600; 
+                color: #777; 
+                vertical-align: middle; 
+                text-align: center;
+                white-space: nowrap;
+            }
             
             .cell-content { display: flex; flex-direction: column; justify-content: center; height: 100%; }
-            .cell-sub { font-weight: bold; font-size: 13px; color: #000; margin-bottom: 3px; }
+            .cell-sub { font-weight: 600; font-size: 13px; color: #000; margin-bottom: 3px; }
             .cell-info { font-size: 11px; margin-top: 2px; }
             .txt-teacher { color: #d32f2f; }
             .txt-room { color: #1976d2; }
             .txt-group { color: #388e3c; }
             .welcome-box { text-align: center; margin-top: 50px; color: #666; }
+
+            /* --- CSS สำหรับโหมด Fit to Page A4 Landscape --- */
+            .fit-to-page {
+                width: 100% !important;
+                padding: 0 !important;
+            }
+            .fit-to-page h2 {
+                font-size: 14px !important; /* ย่อหัวข้อ */
+                margin-top: 5px !important;
+                margin-bottom: 5px !important;
+            }
+            .fit-to-page table.timetable th, 
+            .fit-to-page table.timetable td {
+                font-size: 9px !important; /* ย่อตัวหนังสือในตารางเรียน */
+                padding: 2px !important;
+                height: 35px !important; /* ลดความสูงแถว */
+            }
+            .fit-to-page .cell-sub { font-size: 10px !important; margin-bottom: 1px !important; }
+            .fit-to-page .cell-info { font-size: 8px !important; }
+            .fit-to-page .time-header { font-size: 9px !important; }
+            .fit-to-page .period-label { display: none !important; } /* ซ่อนคำว่า (คาบที่..) เพื่อประหยัดที่ */
+            
+            /* ย่อตารางสรุป */
+            .fit-to-page .summary-container { margin-top: 5px !important; gap: 5px !important; }
+            .fit-to-page table.summary th, 
+            .fit-to-page table.summary td {
+                font-size: 9px !important;
+                padding: 2px !important;
+                height: 20px !important;
+            }
+            
+            /* ย่อกล่องยอดรวม */
+            .fit-to-page .grand-total-box {
+                margin-top: 5px !important;
+                padding: 5px !important;
+            }
+            .fit-to-page .grand-total-box .total-item {
+                font-size: 10px !important;
+            }
+            
+            /* ย่อ Legend */
+            .fit-to-page .group-legend {
+                margin-top: 5px !important;
+                padding-top: 5px !important;
+                font-size: 9px !important;
+            }
+            .fit-to-page .group-legend h4 { margin-bottom: 2px !important; font-size: 10px !important;}
+            .fit-to-page .group-legend li { padding: 1px 4px !important; }
 
             @media print {
                 .navbar { display: none; }
@@ -344,15 +404,34 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             }
             
             function exportPDF() {
+                const btn = document.querySelector('.btn-pdf');
                 const element = document.getElementById('report-content');
+                const originalText = btn.innerText;
+                
+                // 1. ใส่ Class ย่อขนาด (Fit to Page)
+                element.classList.add('fit-to-page');
+                btn.innerText = 'กำลังสร้าง...';
+                
                 const opt = {
-                    margin: 0.3,
+                    margin: 5, // หน่วย mm (ขอบบางๆ)
                     filename: 'timetable-report.pdf',
                     image: { type: 'jpeg', quality: 0.98 },
-                    html2canvas: { scale: 2 },
-                    jsPDF: { unit: 'in', format: 'a4', orientation: 'landscape' }
+                    html2canvas: { scale: 2, useCORS: true }, // scale 2 เพื่อความคมชัด
+                    jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
                 };
-                html2pdf().set(opt).from(element).save();
+                
+                html2pdf().set(opt).from(element).output('bloburl').then(function(pdfUrl) {
+                    window.open(pdfUrl, '_blank');
+                    
+                    // 2. คืนค่าเดิมหลังจากสร้างเสร็จ
+                    element.classList.remove('fit-to-page');
+                    btn.innerText = originalText;
+                }).catch(err => {
+                    console.error(err);
+                    alert('Error generating PDF');
+                    element.classList.remove('fit-to-page');
+                    btn.innerText = originalText;
+                });
             }
 
             function downloadExcel() {
@@ -388,7 +467,7 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                 
                 <div class="btn-group">
                     <button onclick="downloadExcel()" class="btn btn-excel">📗 Excel</button>
-                    <button onclick="exportPDF()" class="btn btn-pdf">📕 PDF (A4)</button>
+                    <button onclick="exportPDF()" class="btn btn-pdf">📕 PDF (One Page)</button>
                     <a href="/download-csv" class="btn btn-csv">📥 CSV</a>
                 </div>
             </div>
@@ -471,7 +550,7 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
         }).join('');
         html += `</tbody></table>`;
 
-        // --- Summary Logic ---
+        // --- Summary Logic (Unique Subjects Only) ---
         const relevantEntries = timetable.filter(t => {
             if (viewType === 'group') return t.group_id === viewId;
             if (viewType === 'teacher') return t.teacher_id === viewId;
@@ -479,16 +558,17 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             return false;
         });
 
+        // Group by "SubjectID"
         const groupedData = {};
         relevantEntries.forEach(entry => {
-            const key = entry.subject_id + "|" + entry.group_id; 
+            const key = entry.subject_id; 
             if(!groupedData[key]) {
-                groupedData[key] = { subject_id: entry.subject_id, group_id: entry.group_id, count: 0 };
+                groupedData[key] = { subject_id: entry.subject_id, count: 0 };
             }
-            groupedData[key].count++;
+            groupedData[key].count++; 
         });
 
-        let grandTotalTheory = 0, grandTotalPractice = 0, grandTotalCredit = 0, grandTotalPeriods = 0;
+        let grandTotalTheory = 0, grandTotalPractice = 0, grandTotalCredit = 0, grandTotalPeriods = 0, grandTotalStdPeriods = 0;
         
         let allRows = Object.values(groupedData).map((item, index) => {
             const sub = subjects.find(s => (s.subject_id || s['subject id']) === item.subject_id);
@@ -496,16 +576,22 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                 const t = parseInt(sub.theory || 0);
                 const p = parseInt(sub.practice || 0);
                 const c = parseInt(sub.credit || 0);
-                const periods = item.count; 
+                const std_periods = t + p; 
+                const actual_periods = item.count; 
 
-                grandTotalTheory += t; grandTotalPractice += p; grandTotalCredit += c; grandTotalPeriods += periods;
+                grandTotalTheory += t;
+                grandTotalPractice += p;
+                grandTotalCredit += c;
+                grandTotalStdPeriods += std_periods;
+                grandTotalPeriods += actual_periods;
 
-                let displayName = sub.subject_name;
-                if(viewType === 'teacher' || viewType === 'room') {
-                    displayName += " (" + item.group_id + ")";
-                }
-
-                return { index: index+1, id: item.subject_id, name: displayName, t, p, c, periods };
+                return { 
+                    index: index+1, 
+                    id: item.subject_id, 
+                    name: sub.subject_name,
+                    t, p, c, std_periods, 
+                    total_periods: actual_periods 
+                };
             }
             return null;
         }).filter(x => x !== null);
@@ -515,8 +601,12 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
         const rightRows = allRows.slice(midPoint);
 
         const calculateSum = (rows) => rows.reduce((acc, curr) => ({
-            t: acc.t + curr.t, p: acc.p + curr.p, c: acc.c + curr.c, periods: acc.periods + curr.periods
-        }), { t:0, p:0, c:0, periods:0 });
+            t: acc.t + curr.t, 
+            p: acc.p + curr.p, 
+            c: acc.c + curr.c, 
+            std_periods: acc.std_periods + curr.std_periods,
+            total_periods: acc.total_periods + curr.total_periods
+        }), { t:0, p:0, c:0, std_periods:0, total_periods:0 });
 
         const leftSum = calculateSum(leftRows);
         const rightSum = calculateSum(rightRows);
@@ -524,13 +614,14 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
         const tableHeader = `
             <thead>
                 <tr>
-                    <th style="width:30px;">#</th>
+                    <th style="width:30px;">ลำดับ</th>
                     <th style="width:80px;">รหัสวิชา</th>
                     <th>ชื่อวิชา</th>
-                    <th style="width:40px;">ท.</th>
-                    <th style="width:40px;">ป.</th>
-                    <th style="width:40px;">นก.</th>
-                    <th style="width:40px;">ชม.</th>
+                    <th style="width:30px;">ท.</th>
+                    <th style="width:30px;">ป.</th>
+                    <th style="width:30px;">นก.</th>
+                    <th style="width:30px;">คาบ</th>
+                    <th style="width:30px;">รวม</th>
                 </tr>
             </thead>`;
             
@@ -542,7 +633,8 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                 <td>${r.t}</td>
                 <td>${r.p}</td>
                 <td>${r.c}</td>
-                <td>${r.periods}</td>
+                <td>${r.std_periods}</td>
+                <td>${r.total_periods}</td>
             </tr>
         `).join('');
 
@@ -553,7 +645,8 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                     <td>${sum.t}</td>
                     <td>${sum.p}</td>
                     <td>${sum.c}</td>
-                    <td>${sum.periods}</td>
+                    <td>${sum.std_periods}</td>
+                    <td>${sum.total_periods}</td>
                 </tr>
             </tfoot>`;
 
@@ -581,7 +674,8 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             <span class="total-item">ทฤษฏี: <b>${grandTotalTheory}</b></span>
             <span class="total-item">ปฏิบัติ: <b>${grandTotalPractice}</b></span>
             <span class="total-item">หน่วยกิต: <b>${grandTotalCredit}</b></span>
-            <span class="total-item">คาบรวม: <b>${grandTotalPeriods}</b></span>
+            <span class="total-item">คาบตามหลักสูตร: <b>${grandTotalStdPeriods}</b></span>
+            <span class="total-item">ชั่วโมงสอนจริง: <b>${grandTotalPeriods}</b></span>
         </div>
         ${groupLegendHTML}
         `;
