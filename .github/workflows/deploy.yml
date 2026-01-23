@@ -2,9 +2,8 @@ name: Deploy to Server
 
 on:
   push:
-    branches:
-      - main
-
+    branches: [ main ]
+ workflow_dispatch:
 jobs:
   deploy:
     runs-on: ubuntu-latest
