@@ -1,9 +1,13 @@
 name: Deploy to Server
 
 on:
+  # 1. ทำงานอัตโนมัติเมื่อมีการ Push ไปที่ main
   push:
     branches:
       - main
+
+  # 2. เพิ่มปุ่มกด Run workflow แบบ Manual (เอาไว้กดเทสได้โดยไม่ต้องแก้โค้ด)
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -16,7 +20,13 @@ jobs:
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.KEY }}
           script: |
-            cd /home/test
+            # --- แก้ไข Path ให้ตรงกับโฟลเดอร์จริงใน Server ของคุณ ---
+            cd /home/test/time-table-nodejs
+            
+            # --- คำสั่งดึงโค้ดและอัปเดต ---
             git pull origin main
             npm install
-            node app.py
+            # node app.js
+            
+            # --- คำสั่ง Restart (เปลี่ยนตามที่คุณใช้จริง) ---
+            pm2 restart timetable
