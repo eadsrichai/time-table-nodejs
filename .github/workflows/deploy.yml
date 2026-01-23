@@ -26,7 +26,7 @@ jobs:
             # --- คำสั่งดึงโค้ดและอัปเดต ---
             git pull origin main
             npm install
-            node app.js
+            # node app.js
             
             # --- คำสั่ง Restart (เปลี่ยนตามที่คุณใช้จริง) ---
-            #  pm2 restart app
+            pm2 restart timetable
