@@ -782,6 +782,7 @@ app.get('/download-excel', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
+// เพิ่ม '0.0.0.0' เป็น argument ตัวที่สอง
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n[SUCCESS] Server Running at http://203.150.107.92:${PORT}`);
 });
