@@ -21,7 +21,7 @@ jobs:
           key: ${{ secrets.KEY }}
           script: |
             # --- แก้ไข Path ให้ตรงกับโฟลเดอร์จริงใน Server ของคุณ ---
-            cd /home/test
+            cd /home/test/time-table-nodejs
             
             # --- คำสั่งดึงโค้ดและอัปเดต ---
             git pull origin main
