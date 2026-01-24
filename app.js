@@ -5,7 +5,7 @@ const path = require('path');
 const ExcelJS = require('exceljs');
 
 const app = express();
-const PORT = 3000;
+const PORT = 80;
 
 // 1. ฟังก์ชันโหลดข้อมูล
 async function readCSV(filePath) {
