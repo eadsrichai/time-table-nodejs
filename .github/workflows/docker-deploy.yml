@@ -1,0 +1,61 @@
+name: Build & Deploy Docker
+
+on:
+  push:
+    branches: [ "main" ]  # ทำงานเมื่อมีการ push เข้า main
+
+env:
+  # ⚠️ แก้ชื่อ Image ตรงนี้ให้เป็นของคุณ (Format: username/repo-name)
+  IMAGE_NAME: wuttiwong/time-table-nodejs
+
+jobs:
+  # ---------------------------------------------------
+  # Job 1: Build & Push (สร้างภาพและส่งขึ้นโกดัง)
+  # ---------------------------------------------------
+  build_and_push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:latest
+
+  # ---------------------------------------------------
+  # Job 2: Deploy (รีโมทไปสั่งรันบน Server)
+  # ---------------------------------------------------
+  deploy:
+    needs: build_and_push  # ต้องรอให้ Job 1 เสร็จก่อน
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connect and Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.KEY }}
+          script: |
+            # 1. ดึง Image เวอร์ชันล่าสุดลงมา
+            sudo docker pull ${{ env.IMAGE_NAME }}:latest
+            
+            # 2. ลบ Container ตัวเก่าทิ้ง (ถ้ามี)
+            # ใส่ || true เพื่อบอกว่า "ถ้าหาไม่เจอ ไม่ต้อง error นะ ให้ข้ามไปเลย"
+            sudo docker stop my-website || true
+            sudo docker rm my-website || true
+            
+            # 3. รัน Container ตัวใหม่
+            sudo docker run -d \
+              --name my-website \
+              -p 3000:3000 \
+              --restart always \
+              ${{ env.IMAGE_NAME }}:latest

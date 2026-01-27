@@ -29,4 +29,4 @@ jobs:
             # node app.js
             
             # --- คำสั่ง Restart (เปลี่ยนตามที่คุณใช้จริง) ---
-            pm2 restart timetable
+            #pm2 restart timetable
