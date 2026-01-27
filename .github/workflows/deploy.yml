@@ -21,7 +21,7 @@ jobs:
           key: ${{ secrets.KEY }}
           script: |
             # --- แก้ไข Path ให้ตรงกับโฟลเดอร์จริงใน Server ของคุณ ---
-            cd /home/web/timetable
+            cd /home/web/timetable 
             
             # --- คำสั่งดึงโค้ดและอัปเดต ---
             git pull origin main
@@ -32,5 +32,5 @@ jobs:
             pm2 restart app_time_v2.js
             pm2 save
 
-            
+
             #pm2 restart my-timetable-app || pm2 start app_time_v2.js --name "my-timetable-app"
