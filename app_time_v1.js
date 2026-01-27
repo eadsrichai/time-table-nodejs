@@ -7,7 +7,7 @@ const ExcelJS = require('exceljs');
 const app = express();
 const PORT = 3000;
 
-// 1. ฟังก์ชันโหลดข้อมูล
+// 1. ฟังก์ชันโหลดข้อมูล (ตัดช่องว่าง Key/Value อัตโนมัติ)
 async function readCSV(filePath) {
     const results = [];
     return new Promise((resolve) => {
@@ -16,7 +16,9 @@ async function readCSV(filePath) {
             .pipe(csv())
             .on('data', (data) => {
                 const cleanData = {};
-                Object.keys(data).forEach(key => { cleanData[key.trim()] = data[key] ? data[key].trim() : ''; });
+                Object.keys(data).forEach(key => { 
+                    cleanData[key.trim()] = data[key] ? data[key].trim() : ''; 
+                });
                 results.push(cleanData);
             })
             .on('end', () => resolve(results))
@@ -24,24 +26,16 @@ async function readCSV(filePath) {
     });
 }
 
-// 2. Logic จัดตาราง
+// 2. Logic จัดตาราง (No Constraints / Free Flow ตามไฟล์ Constra_Basic)
 function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAssignments, groups) {
     let timetable = [];
-    let groupDailyLoad = {};
-
-    const getGroupLoad = (groupId, day) => {
-        if (!groupDailyLoad[groupId]) groupDailyLoad[groupId] = { Mon:0, Tue:0, Wed:0, Thu:0, Fri:0 };
-        return groupDailyLoad[groupId][day] || 0;
-    };
-
-    const incrementGroupLoad = (groupId, day, amount = 1) => {
-        if (!groupDailyLoad[groupId]) groupDailyLoad[groupId] = { Mon:0, Tue:0, Wed:0, Thu:0, Fri:0 };
-        groupDailyLoad[groupId][day] += amount;
-    };
+    let unassignedLog = [];
 
     const isSlotFree = (tSlotId, teacherId, groupId, roomId) => {
-        const teacherBusy = timetable.find(t => t.timeslot_id === tSlotId && t.teacher_id === teacherId);
-        if (teacherBusy) return false;
+        if (teacherId) {
+            const teacherBusy = timetable.find(t => t.timeslot_id === tSlotId && t.teacher_id === teacherId);
+            if (teacherBusy) return false;
+        }
         const groupBusy = timetable.find(t => t.timeslot_id === tSlotId && t.group_id === groupId);
         if (groupBusy) return false;
         if (roomId) {
@@ -51,183 +45,77 @@ function solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAs
         return true;
     };
 
-    const findTargetRoomType = (subjectName, groupName, isPractice) => {
-        const sName = subjectName ? subjectName.toLowerCase() : '';
-        const gName = groupName ? groupName.toLowerCase() : '';
-
-        if (gName.includes('ทวิ') || gName.includes('dual') || gName.includes('dve')) {
-            return 'Factory';
-        }
-        
-        if (sName.includes('iot') || sName.includes('internet of things')) return 'IOT LAB';
-        if (sName.includes('network') || sName.includes('เครือข่าย')) return 'Network Lab';
-        if (sName.includes('ai ') || sName.includes('intelligence') || sName.includes('ปัญญาประดิษฐ์') || sName.includes('วิทยาการข้อมูล')) return 'AI Lab';
-        if (sName.includes('graphic') || sName.includes('กราฟิก') || sName.includes('3d') || sName.includes('multimedia') || sName.includes('game')) return 'Computer Graphic Lab';
-        if (sName.includes('computer') || sName.includes('คอมพิวเตอร์') || sName.includes('programming') || sName.includes('database')) return 'Computer Lab';
-
-        if (isPractice) return 'Practice_General'; 
-        return 'Theory'; 
-    };
-
     const validRegisters = registers.filter(r => {
         const sId = r.subject_id || r['subject id'];
         return subjects.some(s => (s.subject_id || s['subject id']) === sId);
     });
 
-    const sortedRegisters = [...validRegisters].sort((a, b) => {
-        const sIdA = a.subject_id || a['subject id'];
-        const sIdB = b.subject_id || b['subject id'];
-        const subA = subjects.find(s => (s.subject_id || s['subject id']) === sIdA);
-        const subB = subjects.find(s => (s.subject_id || s['subject id']) === sIdB);
-        const totalA = parseInt(subA?.theory||0) + parseInt(subA?.practice||0);
-        const totalB = parseInt(subB?.theory||0) + parseInt(subB?.practice||0);
-        return totalB - totalA;
-    });
-
-    for (const reg of sortedRegisters) {
+    for (const reg of validRegisters) {
         const sId = reg.subject_id || reg['subject id'];
         const gId = reg.group_id || reg['group id'];
         const subject = subjects.find(s => (s.subject_id || s['subject id']) === sId);
-        const groupObj = groups.find(g => (g.group_id || g['group id']) === gId);
         
         if (!subject) continue;
 
-        const theory = parseInt(subject.theory || 0);
-        const practice = parseInt(subject.practice || 0);
-        const totalPeriodsNeeded = theory + practice;
-        const isPractice = practice > 0;
+        const totalPeriodsNeeded = parseInt(subject.theory || 0) + parseInt(subject.practice || 0);
         
-        const assignment = teachAssignments.find(a => (a.subject_id || a['subject id']) === sId);
+        let assignment = teachAssignments.find(a => (a.subject_id || a['subject id']) === sId && (a.group_id || a['group id']) === gId);
+        if (!assignment) {
+            assignment = teachAssignments.find(a => (a.subject_id || a['subject id']) === sId);
+        }
         const teacherId = assignment ? (assignment.teacher_id || assignment['teacher id']) : null;
-        const teacherInfo = teachers.find(t => (t.teacher_id || t['teacher id']) === teacherId);
 
-        const targetRoomType = findTargetRoomType(
-            subject.subject_name, 
-            groupObj ? groupObj.group_name : '', 
-            isPractice
-        );
+        let periodsAssigned = 0;
 
-        let isBlockBooked = false;
+        // First Fit Strategy (ใส่ทันทีที่ว่าง)
+        for (let i = 0; i < totalPeriodsNeeded; i++) {
+            for (const slot of timeslots) {
+                const tSlotId = slot.timeslot_id || slot['timeslot id'];
+                const period = parseInt(slot.period);
 
-        if (totalPeriodsNeeded > 1) {
-            let blockCandidates = [];
-            const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
-            
-            for (const day of days) {
-                for (let startP = 1; startP <= 12 - totalPeriodsNeeded + 1; startP++) {
-                    let isValidBlock = true;
-                    let blockSlots = [];
+                if (period === 5) continue; // เว้นพักเที่ยง
+                if (!isSlotFree(tSlotId, teacherId, gId, null)) continue;
 
-                    for (let k = 0; k < totalPeriodsNeeded; k++) {
-                        const currentP = startP + k;
-                        if (currentP === 5) { isValidBlock = false; break; }
-                        if (teacherInfo?.role === 'Leader' && day === 'Tue' && currentP === 8) { isValidBlock = false; break; }
-
-                        const slotObj = timeslots.find(ts => ts.day === day && parseInt(ts.period) === currentP);
-                        if (!slotObj) { isValidBlock = false; break; }
-
-                        if (!isSlotFree(slotObj.timeslot_id || slotObj['timeslot id'], teacherId, gId, null)) {
-                            isValidBlock = false; break;
-                        }
-                        blockSlots.push(slotObj);
-                    }
-
-                    if (isValidBlock) {
-                        const validRoom = rooms.find(r => {
-                            const rType = r.room_type ? r.room_type.trim() : '';
-                            const rName = r.room_name ? r.room_name.toLowerCase() : '';
-                            let isTypeMatch = false;
-
-                            if (targetRoomType === 'Factory') isTypeMatch = (rType === 'Factory');
-                            else if (targetRoomType === 'Theory') isTypeMatch = (rType === 'Theory');
-                            else if (targetRoomType === 'Practice_General') isTypeMatch = (rType !== 'Theory') && (rType !== 'Factory');
-                            else {
-                                const targetKeyword = targetRoomType.toLowerCase();
-                                isTypeMatch = (rType.toLowerCase() === targetKeyword) || rName.includes(targetKeyword.replace(' lab','')); 
-                            }
-
-                            if (!isTypeMatch) return false;
-                            return blockSlots.every(slot => {
-                                return isSlotFree(slot.timeslot_id || slot['timeslot id'], null, null, r.room_id || r['room id']);
-                            });
-                        });
-
-                        if (validRoom) {
-                            let timePenalty = (startP + totalPeriodsNeeded > 10) ? 500 : 0;
-                            let loadPenalty = getGroupLoad(gId, day) * 10; 
-                            let priorityScore = timePenalty + loadPenalty + startP;
-                            blockCandidates.push({ score: priorityScore, slots: blockSlots, room: validRoom, day: day });
-                        }
+                let assignedRoom = null;
+                for (const room of rooms) {
+                    const rId = room.room_id || room['room id'];
+                    if (isSlotFree(tSlotId, null, null, rId)) {
+                        assignedRoom = rId;
+                        break;
                     }
                 }
-            }
 
-            if (blockCandidates.length > 0) {
-                blockCandidates.sort((a, b) => a.score - b.score);
-                const bestBlock = blockCandidates[0];
-                bestBlock.slots.forEach(slot => {
+                if (assignedRoom) {
                     timetable.push({
-                        group_id: gId, timeslot_id: slot.timeslot_id || slot['timeslot id'],
-                        subject_id: sId, teacher_id: teacherId, room_id: bestBlock.room.room_id || bestBlock.room['room id']
+                        group_id: gId,
+                        timeslot_id: tSlotId,
+                        subject_id: sId,
+                        teacher_id: teacherId,
+                        room_id: assignedRoom
                     });
-                });
-                incrementGroupLoad(gId, bestBlock.day, totalPeriodsNeeded);
-                isBlockBooked = true;
+                    periodsAssigned++;
+                    break;
+                }
             }
         }
 
-        if (!isBlockBooked) {
-            for (let i = 0; i < totalPeriodsNeeded; i++) {
-                let candidates = [];
-                for (const slot of timeslots) {
-                    const tSlotId = slot.timeslot_id || slot['timeslot id'];
-                    const period = parseInt(slot.period);
-                    const day = slot.day;
-
-                    if (period === 5) continue;
-                    if (teacherInfo?.role === 'Leader' && day === 'Tue' && period === 8) continue;
-                    if (!isSlotFree(tSlotId, teacherId, gId, null)) continue;
-
-                    const room = rooms.find(r => {
-                        const rId = r.room_id || r['room id'];
-                        const rType = r.room_type ? r.room_type.trim() : '';
-                        const rName = r.room_name ? r.room_name.toLowerCase() : '';
-                        let isTypeMatch = false;
-                        if (targetRoomType === 'Factory') isTypeMatch = (rType === 'Factory');
-                        else if (targetRoomType === 'Theory') isTypeMatch = (rType === 'Theory');
-                        else if (targetRoomType === 'Practice_General') isTypeMatch = (rType !== 'Theory') && (rType !== 'Factory');
-                        else {
-                            const targetKeyword = targetRoomType.toLowerCase();
-                            isTypeMatch = (rType.toLowerCase() === targetKeyword) || rName.includes(targetKeyword.replace(' lab',''));
-                        }
-                        return isSlotFree(tSlotId, null, null, rId) && isTypeMatch;
-                    });
-
-                    if (room) {
-                        let timePenalty = (period > 10) ? 1000 : 0;
-                        let loadPenalty = getGroupLoad(gId, day) * 10;
-                        let periodPenalty = period;
-                        candidates.push({ score: timePenalty + loadPenalty + periodPenalty, slot: slot, room: room });
-                    }
-                }
-
-                if (candidates.length > 0) {
-                    candidates.sort((a, b) => a.score - b.score);
-                    const best = candidates[0];
-                    timetable.push({
-                        group_id: gId, timeslot_id: best.slot.timeslot_id || best.slot['timeslot id'],
-                        subject_id: sId, teacher_id: teacherId, room_id: best.room.room_id || best.room['room id']
-                    });
-                    incrementGroupLoad(gId, best.slot.day);
-                }
-            }
+        if (periodsAssigned < totalPeriodsNeeded) {
+            unassignedLog.push({
+                subject_id: sId,
+                subject_name: subject.subject_name,
+                group_id: gId,
+                teacher_id: teacherId,
+                missing: totalPeriodsNeeded - periodsAssigned,
+                reason: 'No available slot/room'
+            });
         }
     }
-    return timetable;
+    return { timetable, unassignedLog };
 }
 
 // 3. ฟังก์ชันสร้าง HTML
-function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, rooms, groups) {
+function renderHTML(viewType, viewId, timetableData, timeslots, subjects, teachers, rooms, groups) {
+    const { timetable, unassignedLog } = timetableData;
     const daysEn = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
     const dayMap = { 'Mon': 'วันจันทร์', 'Tue': 'วันอังคาร', 'Wed': 'วันพุธ', 'Thu': 'วันพฤหัสบดี', 'Fri': 'วันศุกร์' };
     const periods = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
@@ -239,9 +127,23 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
         return `${formatTime(startHour)}-${formatTime(endHour)}`;
     };
 
-    const groupOptions = groups.map(g => `<option value="${g.group_id}" ${viewType === 'group' && viewId === g.group_id ? 'selected' : ''}>${g.group_id} - ${g.group_name}</option>`).join('');
-    const teacherOptions = teachers.map(t => `<option value="${t.teacher_id}" ${viewType === 'teacher' && viewId === t.teacher_id ? 'selected' : ''}>${t.teacher_name}</option>`).join('');
-    const roomOptions = rooms.map(r => `<option value="${r.room_id}" ${viewType === 'room' && viewId === r.room_id ? 'selected' : ''}>${r.room_id} - ${r.room_name}</option>`).join('');
+    const groupOptions = groups.map(g => {
+        const id = g.group_id || g['group id'];
+        const name = g.group_name || g['group name'];
+        return `<option value="${id}" ${viewType === 'group' && viewId === id ? 'selected' : ''}>${id} - ${name}</option>`;
+    }).join('');
+
+    const teacherOptions = teachers.map(t => {
+        const id = t.teacher_id || t['teacher id'];
+        const name = t.teacher_name || t['teacher name'];
+        return `<option value="${id}" ${viewType === 'teacher' && viewId === id ? 'selected' : ''}>${name}</option>`;
+    }).join('');
+
+    const roomOptions = rooms.map(r => {
+        const id = r.room_id || r['room id'];
+        const name = r.room_name || r['room name'];
+        return `<option value="${id}" ${viewType === 'room' && viewId === id ? 'selected' : ''}>${id} - ${name}</option>`;
+    }).join('');
 
     const excelLink = `'/download-excel?type=${viewType || ''}&id=${viewId || ''}'`;
 
@@ -254,88 +156,74 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
         
         <style>
-            body { 
-                font-family: 'Prompt', sans-serif; 
-                font-weight: 300; 
-                padding: 0; 
-                margin: 0; 
-                background-color: #f4f6f9; 
-            }
+            body { font-family: 'Prompt', sans-serif; font-weight: 300; padding: 0; margin: 0; background-color: #f4f6f9; }
             .navbar { background-color: #004a99; padding: 15px 20px; color: white; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
             .navbar h1 { margin: 0; font-size: 20px; font-weight: 600; display: flex; align-items: center; }
-            .navbar h1 span { font-size: 12px; background: #2196F3; padding: 2px 8px; border-radius: 10px; margin-left: 10px; font-weight: 400;}
-            
+            .navbar h1 span { font-size: 12px; background: #FF5722; padding: 2px 8px; border-radius: 10px; margin-left: 10px; font-weight: 400; color: white;}
             .menu-container { display: flex; gap: 10px; align-items: center; }
             .menu-item { display: flex; flex-direction: column; }
             .menu-item label { font-size: 10px; margin-bottom: 2px; color: #bbdefb; }
-            
-            select { 
-                padding: 8px; 
-                border-radius: 4px; 
-                border: none; 
-                font-family: 'Prompt', sans-serif; 
-                font-weight: 300;
-                font-size: 14px; 
-                min-width: 180px; 
-                cursor: pointer; 
-            }
+            select { padding: 8px; border-radius: 4px; border: none; font-family: 'Prompt', sans-serif; font-weight: 300; font-size: 14px; min-width: 180px; cursor: pointer; }
             select:focus { outline: 2px solid #82b1ff; }
-            
             .btn-group { display: flex; gap: 5px; margin-left: 10px; }
-            .btn { 
-                color: white; 
-                text-decoration: none; 
-                padding: 8px 12px; 
-                border-radius: 4px; 
-                font-size: 14px; 
-                transition: 0.3s; 
-                cursor: pointer; 
-                border: none; 
-                display: flex; 
-                align-items: center; 
-                gap: 5px; 
-                font-family: 'Prompt', sans-serif; 
-                font-weight: 300;
-            }
+            .btn { color: white; text-decoration: none; padding: 8px 12px; border-radius: 4px; font-size: 14px; transition: 0.3s; cursor: pointer; border: none; display: flex; align-items: center; gap: 5px; font-family: 'Prompt', sans-serif; font-weight: 300; }
             .btn-excel { background: #2e7d32; }
-            .btn-excel:hover { background: #1b5e20; }
             .btn-pdf { background: #d32f2f; }
-            .btn-pdf:hover { background: #b71c1c; }
             .btn-csv { background: #f57f17; }
-            
             .content { padding: 20px; max-width: 1280px; margin: 0 auto; padding-bottom: 50px; background: white; }
             
-            table.timetable { width: 100%; border-collapse: collapse; margin-top: 20px; table-layout: fixed; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+            table.timetable { width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
             table.timetable th, table.timetable td { border: 1px solid #000; padding: 4px; text-align: center; font-size: 11px; height: 55px; vertical-align: middle; overflow: hidden; }
             table.timetable th { background-color: #e3f2fd; color: #333; font-weight: 600; border-bottom: 2px solid #2196F3; }
             
+            /* Header & Advisor Styles */
+            .header-title-box {
+                margin-top: 20px;
+                margin-bottom: 10px;
+                border-left: 5px solid #004a99;
+                padding-left: 10px;
+                display: flex;
+                align-items: baseline; 
+                flex-wrap: wrap;
+                gap: 15px;
+            }
+            .header-title-box h2 {
+                margin: 0;
+                color: #333;
+                font-size: 24px;
+                font-weight: 600;
+            }
+            .advisor-inline {
+                font-size: 16px;
+                color: #555;
+            }
+            .advisor-inline strong {
+                color: #2e7d32;
+                font-weight: 600;
+            }
+
             .summary-container { display: flex; gap: 10px; margin-top: 15px; align-items: flex-start; }
             table.summary { width: 100%; border-collapse: collapse; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-            table.summary th, table.summary td { border: 1px solid #000; padding: 6px; text-align: center; font-size: 12px; }
-            table.summary th { background-color: #004a99; color: white; height: 35px; font-weight: 400; }
+            table.summary th, table.summary td { border: 1px solid #999; padding: 6px; text-align: center; font-size: 12px; }
+            table.summary th { background-color: #e0e0e0; color: #333; height: 35px; font-weight: 600; border-bottom: 2px solid #999; }
             table.summary tfoot td { background-color: #f1f1f1; font-weight: 600; color: #333; }
             
-            .grand-total-box { background-color: #e8f5e9; border: 2px solid #4caf50; border-radius: 5px; padding: 10px; text-align: center; margin-top: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; justify-content: space-around; page-break-inside: avoid; }
-            
+            .grand-total-box { background-color: #f5f5f5; border: 2px solid #ccc; border-radius: 5px; padding: 10px; text-align: center; margin-top: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; justify-content: space-around; page-break-inside: avoid; }
+            .grand-total-box .total-item { color: #333; font-weight: 400; }
+            .grand-total-box .total-item b { color: #000; font-weight: 600; }
+
             .group-legend { margin-top: 20px; border-top: 1px dashed #ccc; padding-top: 10px; font-size: 12px; color: #555; }
             .group-legend h4 { margin: 0 0 5px 0; color: #333; font-weight: 600; }
             .group-legend ul { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 15px; }
             .group-legend li { background: #f5f5f5; padding: 2px 8px; border-radius: 4px; border: 1px solid #eee; }
             .group-legend strong { color: #388e3c; font-weight: 600; }
 
+            .error-log { margin-top: 30px; background: #ffebee; border: 1px solid #ef5350; padding: 15px; border-radius: 5px; color: #c62828; }
+            
             .time-header { font-size: 12px; display: block; margin-bottom: 2px; font-weight: 600; }
             .period-label { font-size: 9px; color: #666; font-weight: 300; }
             .day-col { background-color: #fafafa; font-weight: 600; width: 80px; color: #004a99; border-right: 2px solid #ddd; }
-            
-            .break-col { 
-                background-color: #eee; 
-                font-weight: 600; 
-                color: #777; 
-                vertical-align: middle; 
-                text-align: center;
-                white-space: nowrap;
-            }
-            
+            .break-col { background-color: #eee; font-weight: 600; color: #777; vertical-align: middle; text-align: center; white-space: nowrap; }
             .cell-content { display: flex; flex-direction: column; justify-content: center; height: 100%; }
             .cell-sub { font-weight: 600; font-size: 13px; color: #000; margin-bottom: 3px; }
             .cell-info { font-size: 11px; margin-top: 2px; }
@@ -344,86 +232,72 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             .txt-group { color: #388e3c; }
             .welcome-box { text-align: center; margin-top: 50px; color: #666; }
 
-            /* --- CSS สำหรับโหมด Fit to Page A4 Landscape --- */
-            .fit-to-page {
-                width: 100% !important;
-                padding: 0 !important;
+            /* --- Footer Signature Block (เฉพาะใน PDF) --- */
+            .pdf-footer {
+                display: none; /* ซ่อนบนเว็บ */
+                margin-top: 20px;
+                width: 100%;
+                justify-content: space-around;
+                align-items: flex-end;
+                font-size: 10px;
+                color: #000;
             }
-            .fit-to-page h2 {
-                font-size: 14px !important; /* ย่อหัวข้อ */
-                margin-top: 5px !important;
-                margin-bottom: 5px !important;
+            .signature-box {
+                text-align: center;
+                width: 22%; /* ปรับให้พอดี 4 ช่อง */
+                display: flex;
+                flex-direction: column;
+                align-items: center;
             }
-            .fit-to-page table.timetable th, 
-            .fit-to-page table.timetable td {
-                font-size: 9px !important; /* ย่อตัวหนังสือในตารางเรียน */
-                padding: 2px !important;
-                height: 35px !important; /* ลดความสูงแถว */
+            .signature-line {
+                margin-top: 20px;
+                margin-bottom: 5px;
+                border-bottom: 1px dotted #000;
+                width: 100%;
+                height: 1px;
             }
+            .signature-role {
+                margin-top: 5px;
+                font-weight: 600;
+            }
+
+            /* --- Print / PDF Styles --- */
+            .fit-to-page { width: 100% !important; padding: 0 !important; }
+            
+            /* แสดง Footer เมื่อเป็น PDF */
+            .fit-to-page .pdf-footer { display: flex !important; }
+
+            .fit-to-page .header-title-box { margin-top: 5px !important; margin-bottom: 2px !important; padding-left: 5px !important; border-left-width: 3px !important; }
+            .fit-to-page h2 { font-size: 16px !important; }
+            .fit-to-page .advisor-inline { font-size: 12px !important; }
+            
+            .fit-to-page table.timetable th, .fit-to-page table.timetable td { font-size: 9px !important; padding: 2px !important; height: 35px !important; }
             .fit-to-page .cell-sub { font-size: 10px !important; margin-bottom: 1px !important; }
             .fit-to-page .cell-info { font-size: 8px !important; }
             .fit-to-page .time-header { font-size: 9px !important; }
-            .fit-to-page .period-label { display: none !important; } /* ซ่อนคำว่า (คาบที่..) เพื่อประหยัดที่ */
-            
-            /* ย่อตารางสรุป */
+            .fit-to-page .period-label { display: none !important; } 
             .fit-to-page .summary-container { margin-top: 5px !important; gap: 5px !important; }
-            .fit-to-page table.summary th, 
-            .fit-to-page table.summary td {
-                font-size: 9px !important;
-                padding: 2px !important;
-                height: 20px !important;
-            }
-            
-            /* ย่อกล่องยอดรวม */
-            .fit-to-page .grand-total-box {
-                margin-top: 5px !important;
-                padding: 5px !important;
-            }
-            .fit-to-page .grand-total-box .total-item {
-                font-size: 10px !important;
-            }
-            
-            /* ย่อ Legend */
-            .fit-to-page .group-legend {
-                margin-top: 5px !important;
-                padding-top: 5px !important;
-                font-size: 9px !important;
-            }
+            .fit-to-page table.summary th, .fit-to-page table.summary td { font-size: 9px !important; padding: 2px !important; height: 20px !important; }
+            .fit-to-page .grand-total-box { margin-top: 5px !important; padding: 5px !important; }
+            .fit-to-page .grand-total-box .total-item { font-size: 10px !important; }
+            .fit-to-page .group-legend { margin-top: 5px !important; padding-top: 5px !important; font-size: 9px !important; }
             .fit-to-page .group-legend h4 { margin-bottom: 2px !important; font-size: 10px !important;}
             .fit-to-page .group-legend li { padding: 1px 4px !important; }
+            .fit-to-page .error-log { display: none !important; }
 
-            @media print {
-                .navbar { display: none; }
-                .content { padding: 0; max-width: 100%; }
-                table { page-break-inside: auto; }
-            }
+            @media print { .navbar { display: none; } .content { padding: 0; max-width: 100%; } table { page-break-inside: auto; } }
         </style>
         <script>
-            function navigate(type, id) {
-                if(id) window.location.href = '/?type=' + type + '&id=' + id;
-            }
-            
+            function navigate(type, id) { if(id) window.location.href = '/?type=' + type + '&id=' + id; }
             function exportPDF() {
                 const btn = document.querySelector('.btn-pdf');
                 const element = document.getElementById('report-content');
                 const originalText = btn.innerText;
-                
-                // 1. ใส่ Class ย่อขนาด (Fit to Page)
                 element.classList.add('fit-to-page');
                 btn.innerText = 'กำลังสร้าง...';
-                
-                const opt = {
-                    margin: 5, // หน่วย mm (ขอบบางๆ)
-                    filename: 'timetable-report.pdf',
-                    image: { type: 'jpeg', quality: 0.98 },
-                    html2canvas: { scale: 2, useCORS: true }, // scale 2 เพื่อความคมชัด
-                    jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
-                };
-                
+                const opt = { margin: 5, filename: 'timetable-report.pdf', image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 2, useCORS: true }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' } };
                 html2pdf().set(opt).from(element).output('bloburl').then(function(pdfUrl) {
                     window.open(pdfUrl, '_blank');
-                    
-                    // 2. คืนค่าเดิมหลังจากสร้างเสร็จ
                     element.classList.remove('fit-to-page');
                     btn.innerText = originalText;
                 }).catch(err => {
@@ -433,10 +307,7 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                     btn.innerText = originalText;
                 });
             }
-
-            function downloadExcel() {
-                window.location.href = ${excelLink};
-            }
+            function downloadExcel() { window.location.href = ${excelLink}; }
         </script>
     </head>
     <body>
@@ -464,10 +335,9 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                         ${roomOptions}
                     </select>
                 </div>
-                
                 <div class="btn-group">
                     <button onclick="downloadExcel()" class="btn btn-excel">📗 Excel</button>
-                    <button onclick="exportPDF()" class="btn btn-pdf">📕 PDF (One Page)</button>
+                    <button onclick="exportPDF()" class="btn btn-pdf">📕 PDF (Preview)</button>
                     <a href="/download-csv" class="btn btn-csv">📥 CSV</a>
                 </div>
             </div>
@@ -484,12 +354,43 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             </div>`;
     } else {
         let title = "";
-        if(viewType === 'group') title = `ตารางเรียนกลุ่ม: ${groups.find(g => g.group_id === viewId)?.group_name || viewId}`;
-        if(viewType === 'teacher') title = `ตารางสอน: ${teachers.find(t => t.teacher_id === viewId)?.teacher_name || viewId}`;
-        if(viewType === 'room') title = `ตารางการใช้ห้อง: ${rooms.find(r => r.room_id === viewId)?.room_name || viewId}`;
+        let advisorSpan = "";
 
-        // --- Timetable Section ---
-        html += `<h2 style="color:#333; border-left:5px solid #004a99; padding-left:10px; margin-top:20px;">${title}</h2>
+        if(viewType === 'group') {
+            const currentGroup = groups.find(g => (g.group_id || g['group id']) === viewId);
+            const gName = currentGroup ? (currentGroup.group_name || currentGroup['group name']) : viewId;
+            title = `ตารางเรียนกลุ่ม: ${gName}`;
+            
+            if(currentGroup) {
+                const advisorId = currentGroup.advisor || currentGroup['advisor'] || 
+                                   currentGroup.advisor_id || currentGroup['advisor id'] || 
+                                   currentGroup.teacher_id || currentGroup['teacher id'];
+                
+                if(advisorId) {
+                    const advisorObj = teachers.find(t => 
+                        (t.teacher_id || t['teacher id']) === advisorId ||
+                        (t.teacher_name || t['teacher name']) === advisorId
+                    );
+                    const advisorName = advisorObj ? (advisorObj.teacher_name || advisorObj['teacher name']) : advisorId;
+                    
+                    advisorSpan = `<span class="advisor-inline"> ( <strong>ครูที่ปรึกษา:</strong> ${advisorName} )</span>`;
+                }
+            }
+        }
+        else if(viewType === 'teacher') {
+            const t = teachers.find(t => (t.teacher_id || t['teacher id']) === viewId);
+            title = `ตารางสอน: ${t ? (t.teacher_name || t['teacher name']) : viewId}`;
+        }
+        else if(viewType === 'room') {
+            const r = rooms.find(r => (r.room_id || r['room id']) === viewId);
+            title = `ตารางการใช้ห้อง: ${r ? (r.room_name || r['room name']) : viewId}`;
+        }
+
+        html += `<div class="header-title-box">
+            <h2>${title}</h2>
+            ${advisorSpan}
+        </div>
+        
         <table class="timetable">
             <thead>
                 <tr>
@@ -524,17 +425,20 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                     const g = groups.find(gp => (gp.group_id || gp['group id']) === entry.group_id);
 
                     let infoHTML = '';
-                    const teacherName = t?.teacher_name.split(' ')[0] || entry.teacher_id;
+                    let tName = t ? (t.teacher_name || t['teacher name']) : entry.teacher_id;
+                    if(tName && tName.startsWith('ครู')) tName = tName.replace('ครู','');
 
+                    const rName = r ? (r.room_name || r['room name']) : entry.room_id;
+                    
                     if (viewType === 'group') {
-                        infoHTML = `<span class="cell-info txt-teacher">${teacherName}</span>
-                                    <span class="cell-info txt-room">ห้อง ${r?.room_name || entry.room_id}</span>`;
+                        infoHTML = `<span class="cell-info txt-teacher">${tName}</span>
+                                    <span class="cell-info txt-room">ห้อง ${rName}</span>`;
                     } else if (viewType === 'teacher') {
-                        infoHTML = `<span class="cell-info txt-group">กลุ่ม ${g?.group_id || entry.group_id}</span>
-                                    <span class="cell-info txt-room">ห้อง ${r?.room_name || entry.room_id}</span>`;
+                        infoHTML = `<span class="cell-info txt-group">กลุ่ม ${entry.group_id}</span>
+                                    <span class="cell-info txt-room">ห้อง ${rName}</span>`;
                     } else if (viewType === 'room') {
-                        infoHTML = `<span class="cell-info txt-teacher">${teacherName}</span>
-                                    <span class="cell-info txt-group">กลุ่ม ${g?.group_id || entry.group_id}</span>`;
+                        infoHTML = `<span class="cell-info txt-teacher">${tName}</span>
+                                    <span class="cell-info txt-group">กลุ่ม ${entry.group_id}</span>`;
                     }
 
                     return `<td style="background:#e3f2fd;">
@@ -550,7 +454,6 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
         }).join('');
         html += `</tbody></table>`;
 
-        // --- Summary Logic (Unique Subjects Only) ---
         const relevantEntries = timetable.filter(t => {
             if (viewType === 'group') return t.group_id === viewId;
             if (viewType === 'teacher') return t.teacher_id === viewId;
@@ -568,7 +471,7 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             groupedData[key].count++; 
         });
 
-        let grandTotalTheory = 0, grandTotalPractice = 0, grandTotalCredit = 0, grandTotalPeriods = 0, grandTotalStdPeriods = 0;
+        let grandTotalTheory = 0, grandTotalPractice = 0, grandTotalCredit = 0, grandTotalPeriods = 0;
         
         let allRows = Object.values(groupedData).map((item, index) => {
             const sub = subjects.find(s => (s.subject_id || s['subject id']) === item.subject_id);
@@ -576,21 +479,19 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                 const t = parseInt(sub.theory || 0);
                 const p = parseInt(sub.practice || 0);
                 const c = parseInt(sub.credit || 0);
-                const std_periods = t + p; 
                 const actual_periods = item.count; 
 
                 grandTotalTheory += t;
                 grandTotalPractice += p;
                 grandTotalCredit += c;
-                grandTotalStdPeriods += std_periods;
                 grandTotalPeriods += actual_periods;
 
                 return { 
                     index: index+1, 
                     id: item.subject_id, 
                     name: sub.subject_name,
-                    t, p, c, std_periods, 
-                    total_periods: actual_periods 
+                    t, p, c, 
+                    total: actual_periods 
                 };
             }
             return null;
@@ -604,9 +505,8 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             t: acc.t + curr.t, 
             p: acc.p + curr.p, 
             c: acc.c + curr.c, 
-            std_periods: acc.std_periods + curr.std_periods,
-            total_periods: acc.total_periods + curr.total_periods
-        }), { t:0, p:0, c:0, std_periods:0, total_periods:0 });
+            total: acc.total + curr.total
+        }), { t:0, p:0, c:0, total:0 });
 
         const leftSum = calculateSum(leftRows);
         const rightSum = calculateSum(rightRows);
@@ -620,7 +520,6 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                     <th style="width:30px;">ท.</th>
                     <th style="width:30px;">ป.</th>
                     <th style="width:30px;">นก.</th>
-                    <th style="width:30px;">คาบ</th>
                     <th style="width:30px;">รวม</th>
                 </tr>
             </thead>`;
@@ -633,8 +532,7 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                 <td>${r.t}</td>
                 <td>${r.p}</td>
                 <td>${r.c}</td>
-                <td>${r.std_periods}</td>
-                <td>${r.total_periods}</td>
+                <td>${r.total}</td>
             </tr>
         `).join('');
 
@@ -645,8 +543,7 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                     <td>${sum.t}</td>
                     <td>${sum.p}</td>
                     <td>${sum.c}</td>
-                    <td>${sum.std_periods}</td>
-                    <td>${sum.total_periods}</td>
+                    <td>${sum.total}</td>
                 </tr>
             </tfoot>`;
 
@@ -657,11 +554,29 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
                 <h4>คำอธิบายรหัสกลุ่มเรียน</h4>
                 <ul>`;
             uniqueGroupIds.forEach(gId => {
-                const group = groups.find(g => g.group_id === gId);
-                const gName = group ? group.group_name : 'Unknown';
+                const group = groups.find(g => (g.group_id || g['group id']) === gId);
+                const gName = group ? (group.group_name || group['group name']) : 'Unknown';
                 groupLegendHTML += `<li><strong>${gId}</strong> : ${gName}</li>`;
             });
             groupLegendHTML += `</ul></div>`;
+        }
+
+        let errorLogHTML = '';
+        if (unassignedLog.length > 0) {
+            const filteredLog = unassignedLog.filter(l => {
+                if (viewType === 'group') return l.group_id === viewId;
+                if (viewType === 'teacher') return l.teacher_id === viewId;
+                return true;
+            });
+
+            if (filteredLog.length > 0) {
+                errorLogHTML = `<div class="error-log">
+                    <h3>⚠️ รายวิชาที่จัดลงตารางไม่ได้ (No Constraint - System Full)</h3>
+                    <ul>
+                        ${filteredLog.map(l => `<li><strong>${l.subject_id}</strong> (${l.subject_name}) - ขาด ${l.missing} คาบ [${l.reason}]</li>`).join('')}
+                    </ul>
+                </div>`;
+            }
         }
 
         html += `
@@ -674,10 +589,37 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
             <span class="total-item">ทฤษฏี: <b>${grandTotalTheory}</b></span>
             <span class="total-item">ปฏิบัติ: <b>${grandTotalPractice}</b></span>
             <span class="total-item">หน่วยกิต: <b>${grandTotalCredit}</b></span>
-            <span class="total-item">คาบตามหลักสูตร: <b>${grandTotalStdPeriods}</b></span>
-            <span class="total-item">ชั่วโมงสอนจริง: <b>${grandTotalPeriods}</b></span>
+            <span class="total-item">รวมคาบสอนจริง: <b>${grandTotalPeriods} คาบ</b></span>
         </div>
         ${groupLegendHTML}
+        ${errorLogHTML}
+
+        <div class="pdf-footer">
+            <div class="signature-box">
+                <div>ตรวจแล้ว</div>
+                <div class="signature-line"></div>
+                <div>(.......................................................)</div>
+                <div class="signature-role">หัวหน้าแผนกวิชา</div>
+            </div>
+            <div class="signature-box">
+                <div>ตรวจแล้ว</div>
+                <div class="signature-line"></div>
+                <div>(.......................................................)</div>
+                <div class="signature-role">หัวหน้างานพัฒนาหลักสูตรฯ</div>
+            </div>
+            <div class="signature-box">
+                <div>เห็นควรอนุญาต</div>
+                <div class="signature-line"></div>
+                <div>(.......................................................)</div>
+                <div class="signature-role">รองผู้อำนวยการฝ่ายวิชาการ</div>
+            </div>
+            <div class="signature-box">
+                <div>อนุญาต</div>
+                <div class="signature-line"></div>
+                <div>(.......................................................)</div>
+                <div class="signature-role">ผู้อำนวยการวิทยาลัย...</div>
+            </div>
+        </div>
         `;
     }
 
@@ -685,7 +627,6 @@ function renderHTML(viewType, viewId, timetable, timeslots, subjects, teachers, 
     return html;
 }
 
-// 4. Main Route
 app.get('/', async (req, res) => {
     try {
         const [teachers, rooms, subjects, timeslots, registers, teachAssignments, groups] = await Promise.all([
@@ -693,14 +634,14 @@ app.get('/', async (req, res) => {
             readCSV('timeslot.csv'), readCSV('register.csv'), readCSV('teach.csv'), readCSV('student_group.csv')
         ]);
 
-        const timetable = solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAssignments, groups);
+        const timetableResult = solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAssignments, groups);
         
         const header = 'group_id,timeslot_id,subject_id,teacher_id,room_id\n';
-        const rows = timetable.map(d => `${d.group_id},${d.timeslot_id},${d.subject_id},${d.teacher_id},${d.room_id}`).join('\n');
+        const rows = timetableResult.timetable.map(d => `${d.group_id},${d.timeslot_id},${d.subject_id},${d.teacher_id},${d.room_id}`).join('\n');
         fs.writeFileSync('output.csv', '\ufeff' + header + rows, 'utf8');
 
         const { type, id } = req.query;
-        const html = renderHTML(type, id, timetable, timeslots, subjects, teachers, rooms, groups);
+        const html = renderHTML(type, id, timetableResult, timeslots, subjects, teachers, rooms, groups);
         res.send(html);
 
     } catch (e) {
@@ -709,14 +650,12 @@ app.get('/', async (req, res) => {
     }
 });
 
-// 5. Route Download CSV
 app.get('/download-csv', (req, res) => {
     const file = path.join(__dirname, 'output.csv');
     if(fs.existsSync(file)) res.download(file);
     else res.status(404).send("File not found");
 });
 
-// 6. Route Download Excel
 app.get('/download-excel', async (req, res) => {
     try {
         const { type, id } = req.query;
@@ -726,7 +665,7 @@ app.get('/download-excel', async (req, res) => {
             readCSV('teacher.csv'), readCSV('room.csv'), readCSV('subject.csv'),
             readCSV('timeslot.csv'), readCSV('register.csv'), readCSV('teach.csv'), readCSV('student_group.csv')
         ]);
-        const timetable = solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAssignments, groups);
+        const { timetable } = solveTimetable(teachers, rooms, subjects, timeslots, registers, teachAssignments, groups);
 
         const filteredTimetable = timetable.filter(t => {
             if (type === 'group') return t.group_id === id;
@@ -782,7 +721,6 @@ app.get('/download-excel', async (req, res) => {
     }
 });
 
-// เพิ่ม '0.0.0.0' เป็น argument ตัวที่สอง
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n[SUCCESS] Server Running at http://203.150.107.92:${PORT}`);
+app.listen(PORT, () => {
+    console.log(`\n[SUCCESS] Server Running at http://localhost:${PORT}`);
 });
