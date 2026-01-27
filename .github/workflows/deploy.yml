@@ -30,4 +30,6 @@ jobs:
             
             # --- คำสั่ง Restart (เปลี่ยนตามที่คุณใช้จริง) ---
             pm2 restart app_time_v2.js
+            pm2 save
+            
             #pm2 restart my-timetable-app || pm2 start app_time_v2.js --name "my-timetable-app"
