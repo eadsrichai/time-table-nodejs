@@ -21,12 +21,12 @@ jobs:
           key: ${{ secrets.KEY }}
           script: |
             # --- แก้ไข Path ให้ตรงกับโฟลเดอร์จริงใน Server ของคุณ ---
-            cd /home/test/time-table-nodejs
+            cd /home/web/timetable
             
             # --- คำสั่งดึงโค้ดและอัปเดต ---
             git pull origin main
             npm install
-            # node app.js
+            node app_time_v2.js
             
             # --- คำสั่ง Restart (เปลี่ยนตามที่คุณใช้จริง) ---
             #pm2 restart timetable
